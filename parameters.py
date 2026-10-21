@@ -67,41 +67,75 @@ def assign_through(env: Environment, name: str, value: Any) -> None:
     cell.value = value
 
 
+VALID_MODES = ("value", "reference", "value-result")
+
+
+def _caller_cell(node, caller_env: Environment, param: str, mode: str) -> Cell:
+    """Reference and value-result arguments need a writable caller variable."""
+    if not isinstance(node, Variable):
+        raise TypeError(f"{mode} parameter '{param}' needs a caller variable, got {node!r}")
+    cell = caller_env.resolve(node.name)
+    if not isinstance(cell, Cell):
+        raise TypeError(f"caller variable '{node.name}' is not bound to a Cell")
+    return cell
+
+
 def bind_parameters(param_specs: List[Tuple[str, str]], arg_nodes: list, caller_env: Environment, callee_record) -> None:
     """
     Populate callee_record.locals_env according to each parameter's
-    mode ("value", "reference", or "value-result"). For value-result
-    parameters, also record what commit_value_result needs to do the
-    delayed write-back later -- store it whichever way you like (e.g.
-    an attribute on callee_record such as callee_record.pending_writeback).
+    mode ("value", "reference", or "value-result"). Value-result
+    destinations are recorded on callee_record.pending_writeback,
+    in parameter declaration order, for commit_value_result.
     """
-    # TODO
-    raise NotImplementedError
+    if len(param_specs) != len(arg_nodes):
+        raise TypeError(f"expected {len(param_specs)} argument(s), got {len(arg_nodes)}")
+
+    env = callee_record.locals_env
+    pending: List[Tuple[str, Cell]] = []
+
+    for (name, mode), node in zip(param_specs, arg_nodes):
+        if mode == "value":            
+            cell = Cell(evaluate(node, caller_env))
+        elif mode == "reference":
+            cell = _caller_cell(node, caller_env, name, mode)
+        elif mode == "value-result":
+            dest = _caller_cell(node, caller_env, name, mode)
+            cell = Cell(dest.value)
+            pending.append((name, dest))
+        else:
+            raise ValueError(f"unknown parameter mode {mode!r}; expected one of {VALID_MODES}")
+        env.define(name, cell)
+        callee_record.parameters[name] = mode
+
+    callee_record.pending_writeback = pending
 
 
 def commit_value_result(callee_record, caller_env: Environment) -> None:
     """
-    For every value-result parameter bound by bind_parameters on this
-    callee_record, copy its FINAL local value back into the caller's
-    corresponding variable now (call this only after the callee's body
-    has finished running).
+    Copy each value-result parameter's FINAL local value back into the
+    caller Cell recorded at call time, left to right in parameter order.
+    Call only after the callee body has finished.
     """
-    # TODO
-    raise NotImplementedError
+    for name, dest in getattr(callee_record, "pending_writeback", []):
+        dest.value = callee_record.locals_env.resolve(name).value
+    callee_record.pending_writeback = []
 
 
 class Closure:
     def __init__(self, declaration: FunctionDecl, defining_env: Environment) -> None:
-        # TODO
-        raise NotImplementedError
+        self.declaration = declaration
+        self.defining_env = defining_env
 
     def call(self, args: list, caller_env: Environment):
         """
         Create the callee Environment as a child of self.defining_env
-        (NOT caller_env) -- this is what makes closure capture work.
-        Bind each declaration.params[i] to args[i] (already-evaluated
-        values, wrapped in a Cell), then evaluate declaration.body in
-        that new environment and return the result.
+        (NOT caller_env), bind each parameter to a fresh Cell holding the
+        already-evaluated argument, then evaluate the body there.
         """
-        # TODO
-        raise NotImplementedError
+        params = self.declaration.params
+        if len(args) != len(params):
+            raise TypeError(f"expected {len(params)} argument(s), got {len(args)}")
+        call_env = Environment(parent=self.defining_env)
+        for name, value in zip(params, args):
+            call_env.define(name, Cell(value))
+        return evaluate(self.declaration.body, call_env)
